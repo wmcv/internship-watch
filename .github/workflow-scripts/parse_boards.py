@@ -162,7 +162,7 @@ def dedupe_for_display(new_main: list, new_off: list) -> tuple:
     return out_main, out_off
 
 
-def render_html(new_main: list, new_off: list) -> str:
+def render_html(sections: list) -> str:
     def section(title: str, items: list) -> str:
         if not items:
             return (
@@ -205,7 +205,7 @@ def render_html(new_main: list, new_off: list) -> str:
         parts.append('</table>')
         return "\n".join(parts)
 
-    total = len(new_main) + len(new_off)
+    total = sum(len(items) for _, items in sections)
     return (
         '<html><body style="font-family:-apple-system,BlinkMacSystemFont,'
         '\'Segoe UI\',Roboto,sans-serif;background:#f7f7f7;margin:0;padding:20px;">'
@@ -214,22 +214,21 @@ def render_html(new_main: list, new_off: list) -> str:
         f'<h1 style="font-size:18px;margin:0 0 4px;color:#111;">'
         f'{total} new internship listing{"s" if total != 1 else ""}</h1>'
         '<p style="font-size:12px;color:#888;margin:0 0 8px;">'
-        'US software engineering roles on the SimplifyJobs Summer 2026 boards.</p>'
-        f'{section("Main Board (Summer 2026)", new_main)}'
-        f'{section("Off-Season Board", new_off)}'
+        'US software engineering roles on the SimplifyJobs 2026 and 2027 boards.</p>'
+        + ''.join(section(title, items) for title, items in sections) +
         '<hr style="border:0;border-top:1px solid #eee;margin:20px 0 8px;">'
         '<p style="color:#aaa;font-size:11px;margin:0;">'
         'Sent by internship-watcher · '
-        '<a href="https://github.com/jkhatri23/internship-watcher-standalone/actions" '
+        '<a href="https://github.com/wmcv/internship-watch/actions" '
         'style="color:#aaa;">workflow logs</a></p>'
         '</div></body></html>'
     )
 
 
-def render_plain(new_main: list, new_off: list) -> str:
-    total = len(new_main) + len(new_off)
+def render_plain(sections: list) -> str:
+    total = sum(len(items) for _, items in sections)
     lines = [f"{total} new internship listing(s)", ""]
-    for title, items in [("MAIN BOARD (Summer 2026)", new_main), ("OFF-SEASON BOARD", new_off)]:
+    for title, items in sections:
         lines.append(f"== {title}: {len(items)} new ==")
         if not items:
             lines.append("  (none)")
@@ -241,11 +240,12 @@ def render_plain(new_main: list, new_off: list) -> str:
     return "\n".join(lines)
 
 
-def build_subject(new_main: list, new_off: list) -> str:
-    total = len(new_main) + len(new_off)
+def build_subject(sections: list) -> str:
+    all_items = [item for _, items in sections for item in items]
+    total = len(all_items)
     if total == 0:
         return "No new internship listings"
-    companies = [it["company"] for it in new_main + new_off]
+    companies = [it["company"] for it in all_items]
     unique = list(dict.fromkeys(companies))
     preview = ", ".join(unique[:3])
     suffix = f" +{len(unique) - 3} more" if len(unique) > 3 else ""
@@ -254,8 +254,14 @@ def build_subject(new_main: list, new_off: list) -> str:
 
 
 def main():
-    curr_main = parse_rows("current-main.md")
-    curr_off = parse_rows("current-offseason.md")
+    sources = [
+        ("SUMMER 2026", "current-main-2026.md", "snapshots/previous-main-2026.md"),
+        ("OFF-SEASON 2026", "current-offseason-2026.md", "snapshots/previous-offseason-2026.md"),
+        ("SUMMER 2027", "current-main-2027.md", "snapshots/previous-main.md"),
+        ("OFF-SEASON 2027", "current-offseason-2027.md", "snapshots/previous-offseason.md"),
+    ]
+    current = [(title, parse_rows(path), os.path.exists(previous))
+               for title, path, previous in sources]
 
     seen, had_seen_file = load_seen()
     first_run = not had_seen_file and not seen
@@ -263,30 +269,39 @@ def main():
     def is_new(rid, row):
         return rid not in seen and display_id(row) not in seen
 
-    new_main = [row for rid, row in curr_main.items() if is_new(rid, row)]
-    new_off = [
-        row for rid, row in curr_off.items()
-        if is_new(rid, row) and rid not in curr_main
-    ]
-    new_main, new_off = dedupe_for_display(new_main, new_off)
+    shown = set()
+    sections = []
+    for title, rows, had_snapshot in current:
+        items = []
+        # A newly added source is baselined once instead of emailing its backlog.
+        if had_snapshot:
+            for rid, row in rows.items():
+                key = display_key(row)
+                if is_new(rid, row) and key not in shown:
+                    shown.add(key)
+                    items.append(row)
+        sections.append((title, items))
 
     if first_run:
         # No history at all: record the current boards without emailing.
-        new_main, new_off = [], []
+        sections = [(title, []) for title, _ in sections]
 
-    for rows in (curr_main, curr_off):
+    for _, rows, _ in current:
         seen |= set(rows)
         seen |= {display_id(row) for row in rows.values()}
     save_seen(seen)
 
-    total = len(new_main) + len(new_off)
-    print(f"Parsed: curr_main={len(curr_main)} curr_off={len(curr_off)} "
-          f"seen={len(seen)} seen_file={'yes' if had_seen_file else 'seeded'}")
-    print(f"New: main={len(new_main)} off={len(new_off)} total={total}")
+    total = sum(len(items) for _, items in sections)
+    counts = " ".join(f"{title.lower().replace(' ', '_')}={len(rows)}"
+                      for title, rows, _ in current)
+    print(f"Parsed: {counts} seen={len(seen)} "
+          f"seen_file={'yes' if had_seen_file else 'seeded'}")
+    print("New: " + " ".join(f"{title}={len(items)}" for title, items in sections)
+          + f" total={total}")
 
-    html_body = render_html(new_main, new_off)
-    plain_body = render_plain(new_main, new_off)
-    subject = build_subject(new_main, new_off)
+    html_body = render_html(sections)
+    plain_body = render_plain(sections)
+    subject = build_subject(sections)
 
     output_path = os.environ.get("GITHUB_OUTPUT")
     if not output_path:

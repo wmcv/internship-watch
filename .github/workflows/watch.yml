@@ -26,19 +26,25 @@ jobs:
 
       # Fetched in parallel: the off-season board is ~1 MB and dominates the
       # wall time, so overlapping the two saves most of the smaller fetch.
-      - name: Fetch latest versions of both Simplify boards
+      - name: Fetch Simplify 2026 and 2027 boards
         run: |
           mkdir -p snapshots
-          base=https://raw.githubusercontent.com/SimplifyJobs/Summer2026-Internships/dev
-          curl -sSf --retry 3 --retry-delay 2 --max-time 30 \
-            "$base/README.md" -o current-main.md &
-          pid_main=$!
-          curl -sSf --retry 3 --retry-delay 2 --max-time 30 \
-            "$base/README-Off-Season.md" -o current-offseason.md &
-          pid_off=$!
-          wait $pid_main || { echo "main board fetch failed"; exit 1; }
-          wait $pid_off  || { echo "off-season board fetch failed"; exit 1; }
-          wc -c current-main.md current-offseason.md
+          pids=()
+          for year in 2026 2027; do
+            base="https://raw.githubusercontent.com/SimplifyJobs/Summer${year}-Internships/dev"
+            curl -sSf --retry 3 --retry-delay 2 --max-time 30 \
+              "$base/README.md" -o "current-main-${year}.md" &
+            pids+=("$!")
+            curl -sSf --retry 3 --retry-delay 2 --max-time 30 \
+              "$base/README-Off-Season.md" -o "current-offseason-${year}.md" &
+            pids+=("$!")
+          done
+          failed=0
+          for pid in "${pids[@]}"; do
+            wait "$pid" || failed=1
+          done
+          test "$failed" -eq 0 || { echo "one or more Simplify board fetches failed"; exit 1; }
+          wc -c current-main-*.md current-offseason-*.md
 
       - name: Parse Simplify boards and build email
         id: simplify
@@ -82,8 +88,10 @@ jobs:
       - name: Save Simplify snapshots for next run
         if: ${{ !cancelled() && steps.simplify.outcome == 'success' }}
         run: |
-          cp current-main.md snapshots/previous-main.md
-          cp current-offseason.md snapshots/previous-offseason.md
+          cp current-main-2026.md snapshots/previous-main-2026.md
+          cp current-offseason-2026.md snapshots/previous-offseason-2026.md
+          cp current-main-2027.md snapshots/previous-main.md
+          cp current-offseason-2027.md snapshots/previous-offseason.md
 
       # One workflow owning all four state files means one commit and one push,
       # so the two watchers can no longer collide on rebase.
@@ -93,6 +101,7 @@ jobs:
           git config user.name "github-actions"
           git config user.email "actions@github.com"
           git add snapshots/previous-main.md snapshots/previous-offseason.md \
+                  snapshots/previous-main-2026.md snapshots/previous-offseason-2026.md \
                   snapshots/seen.json snapshots/ats-seen.json
           git diff --staged --quiet && exit 0
           git commit -m "Update watcher state"
