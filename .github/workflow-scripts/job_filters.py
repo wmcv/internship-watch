@@ -10,7 +10,38 @@ scopes rows to its Software Engineering section); ats_watcher.py uses both
 halves, since an ATS board is one undifferentiated list of every open req.
 """
 
+import json
 import re
+from pathlib import Path
+
+CONFIG_PATH = Path(__file__).with_name("watcher_config.json")
+DEFAULT_CONFIG = {
+    "target_countries": ["US"],
+    "keep_ambiguous_locations": True,
+    "additional_role_patterns": [],
+    "additional_exclude_patterns": [],
+}
+
+
+def load_config() -> dict:
+    config = DEFAULT_CONFIG.copy()
+    if CONFIG_PATH.exists():
+        config.update(json.loads(CONFIG_PATH.read_text(encoding="utf-8")))
+    config["target_countries"] = {
+        str(country).upper() for country in config["target_countries"]
+    }
+    return config
+
+
+CONFIG = load_config()
+
+
+def optional_regex(patterns: list):
+    return re.compile("|".join(f"(?:{p})" for p in patterns), re.I) if patterns else None
+
+
+EXTRA_ROLE_RE = optional_regex(CONFIG["additional_role_patterns"])
+EXTRA_EXCLUDE_RE = optional_regex(CONFIG["additional_exclude_patterns"])
 
 INTERN_RE = re.compile(r"\bintern(ship)?\b|\bco[- ]?op\b", re.I)
 
@@ -100,29 +131,40 @@ NON_US_RE = re.compile(
     re.I,
 )
 
+CANADA_RE = re.compile(
+    r"canada|ontario|toronto|vancouver|montr[eé]al|quebec|calgary|ottawa|"
+    r"waterloo|british columbia|halifax|nova scotia|new brunswick|manitoba|"
+    r"saskatchewan|newfoundland|prince edward island|"
+    r",\s?(?-i:ON|QC|BC|AB|MB|SK|NS|NB|NL|PE|YT|NT|NU)\b",
+    re.I,
+)
+
 
 def wanted_title(title: str) -> bool:
     """True for an in-profile internship title on a raw ATS board."""
-    if not (INTERN_RE.search(title) and ROLE_RE.search(title)):
+    role_match = ROLE_RE.search(title) or (EXTRA_ROLE_RE and EXTRA_ROLE_RE.search(title))
+    if not (INTERN_RE.search(title) and role_match):
         return False
-    if EXCLUDE_RE.search(title):
+    if EXCLUDE_RE.search(title) or (EXTRA_EXCLUDE_RE and EXTRA_EXCLUDE_RE.search(title)):
         return False
     if AI_EXCLUDE_RE.search(title) and not SWE_RE.search(title):
         return False
     return True
 
 
-def is_us(location: str) -> bool:
-    """US hint wins, then a clearly-foreign hint loses; ambiguous strings
-    (bare "Remote", city-only names) are kept rather than dropped.
-
-    Multi-location rows ("Toronto, ON · New York, NY") keep on the US hit,
-    so a role that is US-available anywhere still gets through.
-    """
+def wanted_location(location: str) -> bool:
+    """Return true when a location matches a configured target country."""
     if not location:
+        return bool(CONFIG["keep_ambiguous_locations"])
+    if "US" in CONFIG["target_countries"] and US_HINT_RE.search(location):
         return True
-    if US_HINT_RE.search(location):
+    if "CA" in CONFIG["target_countries"] and CANADA_RE.search(location):
         return True
     if NON_US_RE.search(location):
         return False
-    return True
+    return bool(CONFIG["keep_ambiguous_locations"])
+
+
+def is_us(location: str) -> bool:
+    """Backward-compatible alias for older callers."""
+    return wanted_location(location)

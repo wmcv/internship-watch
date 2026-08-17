@@ -21,6 +21,13 @@ jobs:
   watch:
     runs-on: ubuntu-latest
     steps:
+      - name: Notify heartbeat monitor that the run started
+        env:
+          HEARTBEAT_URL: ${{ secrets.HEARTBEAT_URL }}
+        run: |
+          test -z "$HEARTBEAT_URL" || \
+            curl -fsS --retry 3 --max-time 10 "${HEARTBEAT_URL%/}/start"
+
       - name: Checkout this repo
         uses: actions/checkout@v4
 
@@ -45,6 +52,9 @@ jobs:
           done
           test "$failed" -eq 0 || { echo "one or more Simplify board fetches failed"; exit 1; }
           wc -c current-main-*.md current-offseason-*.md
+
+      - name: Test watcher filters and parser
+        run: python3 -m unittest discover -s .github/workflow-scripts -p 'test_*.py'
 
       - name: Parse Simplify boards and build email
         id: simplify
@@ -85,6 +95,24 @@ jobs:
           html_body: ${{ steps.ats.outputs.html_body }}
           body: ${{ steps.ats.outputs.plain_body }}
 
+      - name: Warn if ATS boards failed
+        if: ${{ !cancelled() && steps.ats.outputs.new_failed_count != '' && steps.ats.outputs.new_failed_count != '0' }}
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 465
+          username: ${{ secrets.MAIL_USERNAME }}
+          password: ${{ secrets.MAIL_PASSWORD }}
+          subject: Internship Watcher warning — ${{ steps.ats.outputs.new_failed_count }} ATS boards newly failing
+          to: ${{ secrets.MAIL_TO }}
+          from: Internship Watcher Health
+          body: |
+            The watcher completed, but these ATS boards started failing:
+            ${{ steps.ats.outputs.new_failed_names }}
+
+            The next scheduled run will retry them automatically.
+            Logs: https://github.com/wmcv/internship-watch/actions/runs/${{ github.run_id }}
+
       - name: Save Simplify snapshots for next run
         if: ${{ !cancelled() && steps.simplify.outcome == 'success' }}
         run: |
@@ -102,7 +130,7 @@ jobs:
           git config user.email "actions@github.com"
           git add snapshots/previous-main.md snapshots/previous-offseason.md \
                   snapshots/previous-main-2026.md snapshots/previous-offseason-2026.md \
-                  snapshots/seen.json snapshots/ats-seen.json
+                  snapshots/seen.json snapshots/ats-seen.json snapshots/ats-failures.json
           git diff --staged --quiet && exit 0
           git commit -m "Update watcher state"
           for attempt in 1 2 3; do
@@ -112,3 +140,31 @@ jobs:
             sleep 5
           done
           echo "could not push after 3 attempts"; exit 1
+
+      - name: Email fatal workflow failure
+        if: ${{ failure() }}
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 465
+          username: ${{ secrets.MAIL_USERNAME }}
+          password: ${{ secrets.MAIL_PASSWORD }}
+          subject: Internship Watcher failed
+          to: ${{ secrets.MAIL_TO }}
+          from: Internship Watcher Health
+          body: |
+            The internship watcher failed before completing all checks.
+            Review the run: https://github.com/wmcv/internship-watch/actions/runs/${{ github.run_id }}
+
+      - name: Report final status to heartbeat monitor
+        if: ${{ always() }}
+        env:
+          HEARTBEAT_URL: ${{ secrets.HEARTBEAT_URL }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          test -z "$HEARTBEAT_URL" && exit 0
+          if test "$JOB_STATUS" = "success"; then
+            curl -fsS --retry 3 --max-time 10 "${HEARTBEAT_URL%/}"
+          else
+            curl -fsS --retry 3 --max-time 10 "${HEARTBEAT_URL%/}/fail"
+          fi

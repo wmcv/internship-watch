@@ -5,7 +5,7 @@ import re
 import sys
 from pathlib import Path
 
-from job_filters import is_us
+from job_filters import wanted_location
 
 TR_RE = re.compile(r"<tr>(.*?)</tr>", re.DOTALL)
 TD_RE = re.compile(r"<td[^>]*>(.*?)</td>", re.DOTALL)
@@ -91,7 +91,7 @@ def parse_rows(path: str) -> dict:
             continue
         role = strip_html(tds[1])
         location = strip_html(tds[2])
-        if not is_us(location):
+        if not wanted_location(location):
             continue
         # The apply cell is tds[3] on the main board but tds[4] on the
         # off-season board (extra "Terms" column), so search the whole row.
@@ -99,11 +99,13 @@ def parse_rows(path: str) -> dict:
         if not apply_match or "🔒" in block:
             continue
         apply_url = apply_match.group(1)
+        term = strip_html(tds[3]) if len(tds) >= 6 else "Summer"
         rid = row_id(block, company_name, role, location, apply_url)
         rows[rid] = {
             "company": company_name,
             "role": role,
             "location": location,
+            "term": term,
             "apply_url": apply_url,
         }
     return rows
@@ -138,6 +140,7 @@ def display_key(it: dict) -> tuple:
         it["company"].strip().lower(),
         WHITESPACE_RE.sub(" ", role).strip().lower(),
         it["location"].strip().lower(),
+        it.get("term", "").strip().lower(),
     )
 
 
@@ -195,6 +198,8 @@ def render_html(sections: list) -> str:
                 f'{html.escape(it["role"])}</div>'
                 f'<div style="font-size:12px;color:#666;margin-top:2px;">'
                 f'{html.escape(it["location"])}</div>'
+                f'<div style="font-size:12px;color:#7c3aed;margin-top:2px;">'
+                f'{html.escape(it.get("term") or "Term not listed")}</div>'
                 '</td>'
                 '<td style="padding:10px 0;border-bottom:1px solid #eee;'
                 'vertical-align:middle;text-align:right;white-space:nowrap;">'
@@ -235,6 +240,7 @@ def render_plain(sections: list) -> str:
         for it in items:
             lines.append(f"  {it['company']} - {it['role']}")
             lines.append(f"    Location: {it['location']}")
+            lines.append(f"    Term: {it.get('term') or '(not listed)'}")
             lines.append(f"    Apply: {it['apply_url'] or '(no direct link)'}")
         lines.append("")
     return "\n".join(lines)

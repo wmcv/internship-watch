@@ -1,0 +1,6 @@
+{
+  "target_countries": ["US", "CA"],
+  "keep_ambiguous_locations": true,
+  "additional_role_patterns": [],
+  "additional_exclude_patterns": []
+}

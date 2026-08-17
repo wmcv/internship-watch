@@ -18,11 +18,12 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-from job_filters import is_us, wanted_title
+from job_filters import wanted_location, wanted_title
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 COMPANIES_PATH = SCRIPT_DIR / "ats_companies.json"
 SEEN_PATH = Path("snapshots/ats-seen.json")
+FAILURES_PATH = Path("snapshots/ats-failures.json")
 
 WHITESPACE_RE = re.compile(r"\s+")
 
@@ -107,7 +108,7 @@ def collect_matches() -> tuple:
                 print(f"WARN: {c['ats']}:{c['slug']} failed: {e}", file=sys.stderr)
                 continue
             for j in jobs:
-                if wanted_title(j["title"]) and is_us(j["location"]):
+                if wanted_title(j["title"]) and wanted_location(j["location"]):
                     j["company"] = c["name"]
                     matches.append(j)
     matches.sort(key=lambda j: (j["company"].lower(), j["title"].lower()))
@@ -181,6 +182,18 @@ def build_subject(items: list) -> str:
 def main():
     matches, failed = collect_matches()
 
+    previous_failures = set()
+    if FAILURES_PATH.exists():
+        try:
+            previous_failures = set(json.loads(FAILURES_PATH.read_text(encoding="utf-8")))
+        except (ValueError, OSError):
+            pass
+    new_failures = sorted(set(failed) - previous_failures)
+    FAILURES_PATH.parent.mkdir(exist_ok=True)
+    FAILURES_PATH.write_text(
+        json.dumps(sorted(failed), indent=0) + "\n", encoding="utf-8"
+    )
+
     first_run = not SEEN_PATH.exists()
     seen = set()
     if not first_run:
@@ -231,6 +244,10 @@ def main():
 
     with open(output_path, "a", encoding="utf-8") as f:
         f.write(f"total={total}\n")
+        f.write(f"failed_count={len(failed)}\n")
+        f.write(f"failed_names={', '.join(failed)}\n")
+        f.write(f"new_failed_count={len(new_failures)}\n")
+        f.write(f"new_failed_names={', '.join(new_failures)}\n")
         f.write(f"subject={subject}\n")
         f.write("html_body<<HTMLEOF\n")
         f.write(html_body)
