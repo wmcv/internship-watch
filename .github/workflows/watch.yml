@@ -1,0 +1,105 @@
+name: Internship Watcher
+
+# Primary trigger is workflow_dispatch, fired by an external pinger (cron-job.org
+# / Cloudflare Worker). Dispatched runs skip GitHub's scheduled-event queue, which
+# was adding a median 16 min of delay and silently dropping ~58% of runs.
+# The schedule below is only a backstop for when the pinger is down.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '*/15 * * * *'
+
+permissions:
+  contents: write
+
+# Serialize runs: every run commits state, so overlapping runs race on the push.
+concurrency:
+  group: internship-watcher
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout this repo
+        uses: actions/checkout@v4
+
+      # Fetched in parallel: the off-season board is ~1 MB and dominates the
+      # wall time, so overlapping the two saves most of the smaller fetch.
+      - name: Fetch latest versions of both Simplify boards
+        run: |
+          mkdir -p snapshots
+          base=https://raw.githubusercontent.com/SimplifyJobs/Summer2026-Internships/dev
+          curl -sSf --retry 3 --retry-delay 2 --max-time 30 \
+            "$base/README.md" -o current-main.md &
+          pid_main=$!
+          curl -sSf --retry 3 --retry-delay 2 --max-time 30 \
+            "$base/README-Off-Season.md" -o current-offseason.md &
+          pid_off=$!
+          wait $pid_main || { echo "main board fetch failed"; exit 1; }
+          wait $pid_off  || { echo "off-season board fetch failed"; exit 1; }
+          wc -c current-main.md current-offseason.md
+
+      - name: Parse Simplify boards and build email
+        id: simplify
+        run: python3 .github/workflow-scripts/parse_boards.py
+
+      - name: Send Simplify email if new rows found
+        if: steps.simplify.outputs.total != '0'
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 465
+          username: ${{ secrets.MAIL_USERNAME }}
+          password: ${{ secrets.MAIL_PASSWORD }}
+          subject: ${{ steps.simplify.outputs.subject }}
+          to: ${{ secrets.MAIL_TO }}
+          from: Internship Watcher
+          html_body: ${{ steps.simplify.outputs.html_body }}
+          body: ${{ steps.simplify.outputs.plain_body }}
+
+      # Runs even if the Simplify half failed — the two sources are independent,
+      # and a bad fetch upstream shouldn't cost us the ATS poll.
+      - name: Poll ATS boards and build email
+        id: ats
+        if: ${{ !cancelled() }}
+        run: python3 .github/workflow-scripts/ats_watcher.py
+
+      - name: Send ATS email if new roles found
+        if: ${{ !cancelled() && steps.ats.outputs.total != '' && steps.ats.outputs.total != '0' }}
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 465
+          username: ${{ secrets.MAIL_USERNAME }}
+          password: ${{ secrets.MAIL_PASSWORD }}
+          subject: ${{ steps.ats.outputs.subject }}
+          to: ${{ secrets.MAIL_TO }}
+          from: Internship Watcher (ATS)
+          html_body: ${{ steps.ats.outputs.html_body }}
+          body: ${{ steps.ats.outputs.plain_body }}
+
+      - name: Save Simplify snapshots for next run
+        if: ${{ !cancelled() && steps.simplify.outcome == 'success' }}
+        run: |
+          cp current-main.md snapshots/previous-main.md
+          cp current-offseason.md snapshots/previous-offseason.md
+
+      # One workflow owning all four state files means one commit and one push,
+      # so the two watchers can no longer collide on rebase.
+      - name: Commit updated state
+        if: ${{ !cancelled() }}
+        run: |
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git add snapshots/previous-main.md snapshots/previous-offseason.md \
+                  snapshots/seen.json snapshots/ats-seen.json
+          git diff --staged --quiet && exit 0
+          git commit -m "Update watcher state"
+          for attempt in 1 2 3; do
+            git pull --rebase origin main && git push && exit 0
+            echo "push attempt $attempt failed; retrying"
+            git rebase --abort 2>/dev/null || true
+            sleep 5
+          done
+          echo "could not push after 3 attempts"; exit 1
